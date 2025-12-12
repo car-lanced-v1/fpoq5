@@ -43,7 +43,7 @@ class ModelParser:
         c_coeffs = {}
         A_ub, b_ub = [], []
         A_eq, b_eq = [], []
-        bounds_map = {} # Para casos específicos como x1 >= 4
+        bounds_map = {} 
 
         # 1. Identificar Objetivo
         obj_line = lines[0].lower()
@@ -65,9 +65,9 @@ class ModelParser:
                 constraints_started = True
                 continue
             
-            # Pula comentários ou restrições de sinal genéricas (x >= 0)
+            # Pula comentários ou restrições de sinal genéricas
             if not constraints_started or line.startswith('#'): continue
-            if '>= 0' in line and ',' in line: continue # Ignora "x1, x2 >= 0"
+            if '>= 0' in line and ',' in line: continue 
 
             # Detectar operador
             operator = None
@@ -79,7 +79,7 @@ class ModelParser:
 
             lhs, rhs = line.split(operator)
             try: rhs_val = float(rhs.strip())
-            except: continue # Pula se não conseguir ler o número direito
+            except: continue 
 
             row_coeffs = self._parse_expression(lhs)
 
@@ -87,13 +87,11 @@ class ModelParser:
             if operator == '<=':
                 A_ub.append((row_coeffs, rhs_val))
             elif operator == '>=':
-                # Se for apenas uma variável (ex: x2 >= 4), é um bound
                 if len(row_coeffs) == 1 and list(row_coeffs.values())[0] == 1.0:
                     var_idx = list(row_coeffs.keys())[0]
                     current_min, current_max = bounds_map.get(var_idx, (0, None))
                     bounds_map[var_idx] = (max(current_min, rhs_val), current_max)
                 else:
-                    # Restrição normal invertida
                     neg_coeffs = {k: -v for k, v in row_coeffs.items()}
                     A_ub.append((neg_coeffs, -rhs_val))
             elif operator == '=':
@@ -118,7 +116,6 @@ class ModelParser:
                 vec_b_eq[i] = val
                 for idx, v in coeffs.items(): mat_A_eq[i, idx] = v
         
-        # Consolida bounds
         final_bounds = []
         for i in range(n_vars):
             final_bounds.append(bounds_map.get(i, (0, None)))
@@ -242,8 +239,6 @@ def main():
     
     st.divider()
 
-    # --- Dicionário de Exercícios Completo ---
-    # A notação >= 0 é adicionada ao final para clareza visual, embora o parser assuma default.
     exercises = {
         "Selecione um exercício...": "",
         "Ex 17: Energéticos": "Minimizar Z = 0.06x1 + 0.08x2\nSujeito a:\n8x1 + 6x2 >= 48\n1x1 + 2x2 >= 12\n1x1 + 2x2 <= 20\nx1, x2 >= 0",
@@ -259,16 +254,13 @@ def main():
         "Ex 31: Bens Capital": "Maximizar Z = 3x1 - 2x2 + 6x3\nSujeito a:\nx1 + x2 + 2x3 = 12\n2x1 + 3x2 + 12x3 <= 48\nx1, x2, x3 >= 0"
     }
 
-    # --- Área de Seleção e Edição (Layout Melhorado) ---
     col_input, col_info = st.columns([2, 1])
 
     with col_input:
         st.subheader("1. Entrada de Dados")
         
-        # Selectbox acima da área de texto
         selected_key = st.selectbox("📚 Carregar Exercício da Lista:", list(exercises.keys()))
         
-        # Área de texto populada dinamicamente
         input_value = exercises[selected_key]
         problem_text = st.text_area("Edite o modelo matemático aqui:", value=input_value, height=350,
                                     placeholder="Maximizar Z = ...\nSujeito a:\n...")
@@ -278,11 +270,11 @@ def main():
     with col_info:
         st.info("""
         **Guia de Sintaxe:**
-        1. **Objetivo:** Comece com 'Maximizar' ou 'Minimizar'. Use '='.
-        2. **Restrições:** Use `Sujeito a:` seguido das equações.
-        3. **Operadores:** Use `<=`, `>=` ou `=`.
-        4. **Variáveis:** Use nomes como `x1`, `xA`, `y`.
-        5. **Não-negatividade:** O sistema assume `x >= 0` por padrão, mas você pode escrever para clareza.
+        1. **Objetivo:** 'Maximizar' ou 'Minimizar' com '='.
+        2. **Restrições:** Use `Sujeito a:` ou `Restrições:`
+        3. **Operadores:** `<=`, `>=` ou `=`.
+        4. **Variáveis:** Ex: `x1`, `xA`, `y`.
+        5. **Sinal:** `x >= 0` é o padrão, mas pode ser explícito.
         
         *Exemplo:*
         ```text
@@ -300,14 +292,11 @@ def main():
     # --- Processamento ---
     if solve_btn and problem_text:
         try:
-            # 1. Parsing
             parser = ModelParser()
             model_data = parser.parse(problem_text)
             
-            # 2. Feedback Matemático (LaTeX)
             st.subheader("2. Interpretação do Modelo")
             
-            # Formatação da FO
             sense = model_data['sense'].title()
             terms = []
             for i, c in enumerate(model_data['c']):
@@ -317,16 +306,13 @@ def main():
                     terms.append(f"{s}{model_data['var_names'][i]}")
             st.latex(f"\\text{{{sense}}} \\quad Z = {' '.join(terms)}")
             
-            # Formatação das Restrições
             st.markdown("**Restrições Identificadas:**")
             
-            # UB
             if model_data['A_ub'] is not None:
                 for i, row in enumerate(model_data['A_ub']):
                     lhs = " + ".join([f"{v:.2g}{model_data['var_names'][j]}" for j, v in enumerate(row) if abs(v)>1e-5])
                     st.latex(f"{lhs} \\le {model_data['b_ub'][i]:.2g}")
             
-            # EQ
             if model_data['A_eq'] is not None:
                 for i, row in enumerate(model_data['A_eq']):
                     lhs = " + ".join([f"{v:.2g}{model_data['var_names'][j]}" for j, v in enumerate(row) if abs(v)>1e-5])
@@ -334,7 +320,6 @@ def main():
             
             st.latex(f"{', '.join(model_data['var_names'])} \\ge 0, \\in \\mathbb{{Z}}")
 
-            # 3. Solver
             solver = BranchAndBoundSolver(
                 c=model_data['c'], A_ub=model_data['A_ub'], b_ub=model_data['b_ub'],
                 A_eq=model_data['A_eq'], b_eq=model_data['b_eq'], bounds=model_data['bounds'],
@@ -344,23 +329,26 @@ def main():
             with st.spinner("Calculando solução ótima inteira..."):
                 best_sol, best_val = solver.solve()
 
-            # 4. Resultados
+            # --- CORREÇÃO DE ALINHAMENTO ---
             st.subheader("3. Resultados")
-            col_res1, col_res2 = st.columns(2)
             
             if best_sol is not None:
+                # 1. Alerta de Status ocupa toda a largura (Full Width)
+                st.success("✅ **Solução Ótima Inteira Encontrada**")
+                
+                # 2. Métricas alinhadas em colunas lado a lado
+                col_res1, col_res2 = st.columns(2)
+                
                 with col_res1:
-                    st.success("✅ Solução Ótima Inteira Encontrada")
-                    st.metric("Função Objetivo (Z*)", f"{best_val:.4f}")
+                    st.metric(label="Função Objetivo (Z*)", value=f"{best_val:.4f}")
+                    
                 with col_res2:
-                    st.write("**Variáveis de Decisão (x*):**")
-                    # Formatação de Tupla (x1, x2, ...)
+                    # Formatação de Tupla limpa
                     tuple_str = str(tuple([int(round(v)) for v in best_sol])).replace("'", "")
-                    st.code(tuple_str, language="text")
+                    st.metric(label="Variáveis de Decisão (x*)", value=tuple_str)
             else:
                 st.error("⚠️ Não foi encontrada solução inteira viável para as restrições dadas.")
 
-            # 5. Tabela de Auditoria (Log)
             st.subheader("4. Detalhes da Execução (Árvore de Decisão)")
             
             tree_data = []
@@ -376,7 +364,6 @@ def main():
             
             st.dataframe(pd.DataFrame(tree_data), use_container_width=True, hide_index=True)
 
-            # 6. Relatório para Download
             report_lines = [
                 "RELATÓRIO FINAL - SOLVER BRANCH AND BOUND",
                 "="*50,
