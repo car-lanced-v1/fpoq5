@@ -10,8 +10,8 @@ import pandas as pd
 # ==============================================================================
 class ModelParser:
     def __init__(self):
-        self.var_map = {}  # Mapeia 'x1' -> 0, 'x2' -> 1
-        self.var_names = [] # Lista ordenada de nomes
+        self.var_map = {}
+        self.var_names = [] 
 
     def _get_var_index(self, var_name):
         if var_name not in self.var_map:
@@ -21,49 +21,38 @@ class ModelParser:
 
     def _parse_expression(self, expr):
         """Lê uma expressão linear (ex: '2x1 - 3x2') e retorna coeficientes."""
-        # Remove espaços e padroniza
         expr = expr.replace(" ", "")
-        
         # Regex para capturar termo: (sinal?)(numero?)(variavel)
-        # Ex: -2x1, +x2, x3, -x4
         pattern = r'([+-]?\d*\.?\d*)([a-zA-Z_][a-zA-Z0-9_]*)'
         matches = re.findall(pattern, expr)
         
         coeffs = {}
         for coeff_str, var_name in matches:
             idx = self._get_var_index(var_name)
-            
-            # Tratar coeficientes implícitos
             if coeff_str in ['', '+']: val = 1.0
             elif coeff_str == '-': val = -1.0
             else: val = float(coeff_str)
-            
             coeffs[idx] = coeffs.get(idx, 0) + val
-            
         return coeffs
 
     def parse(self, text):
         lines = [l.strip() for l in text.split('\n') if l.strip()]
-        if not lines:
-            raise ValueError("O texto de entrada está vazio.")
+        if not lines: raise ValueError("O texto de entrada está vazio.")
 
         sense = 'max'
         c_coeffs = {}
         A_ub, b_ub = [], []
         A_eq, b_eq = [], []
+        bounds_map = {} # Para casos específicos como x1 >= 4
 
         # 1. Identificar Objetivo
         obj_line = lines[0].lower()
-        if 'minimizar' in obj_line or 'min' in obj_line:
-            sense = 'min'
-        elif 'maximizar' in obj_line or 'max' in obj_line:
-            sense = 'max'
-        else:
-            raise ValueError("A primeira linha deve indicar 'Maximizar' ou 'Minimizar'.")
+        if 'minimizar' in obj_line or 'min' in obj_line: sense = 'min'
+        elif 'maximizar' in obj_line or 'max' in obj_line: sense = 'max'
+        else: raise ValueError("A primeira linha deve indicar 'Maximizar' ou 'Minimizar'.")
 
-        # Parse Função Objetivo (Lado direito do '=')
         if '=' not in lines[0]:
-             raise ValueError("A função objetivo deve conter '=' (Ex: Maximizar Z = 2x1 + 3x2)")
+             raise ValueError("A função objetivo deve conter '=' (Ex: Maximizar Z = ...)")
         
         obj_expr = lines[0].split('=')[1]
         c_coeffs = self._parse_expression(obj_expr)
@@ -76,77 +65,73 @@ class ModelParser:
                 constraints_started = True
                 continue
             
-            # Ignorar linhas de comentário ou vazias
-            if not constraints_started or line.startswith('#'):
-                continue
+            # Pula comentários ou restrições de sinal genéricas (x >= 0)
+            if not constraints_started or line.startswith('#'): continue
+            if '>= 0' in line and ',' in line: continue # Ignora "x1, x2 >= 0"
 
             # Detectar operador
             operator = None
             if '<=' in line: operator = '<='
             elif '>=' in line: operator = '>='
-            elif '=' in line: operator = '=' # Igualdade estrita
+            elif '=' in line: operator = '='
             
-            if not operator:
-                # Pode ser linha de declaração de variáveis (ignorar por enquanto, assume >= 0)
-                continue
+            if not operator: continue
 
             lhs, rhs = line.split(operator)
-            try:
-                rhs_val = float(rhs.strip())
-            except:
-                raise ValueError(f"O lado direito da restrição deve ser um número: '{line}'")
+            try: rhs_val = float(rhs.strip())
+            except: continue # Pula se não conseguir ler o número direito
 
             row_coeffs = self._parse_expression(lhs)
 
-            # Normalização para Solver (Ax <= b ou Ax = b)
+            # Normalização
             if operator == '<=':
-                # Mantém
                 A_ub.append((row_coeffs, rhs_val))
             elif operator == '>=':
-                # Multiplica por -1 para virar <=
-                neg_coeffs = {k: -v for k, v in row_coeffs.items()}
-                A_ub.append((neg_coeffs, -rhs_val))
+                # Se for apenas uma variável (ex: x2 >= 4), é um bound
+                if len(row_coeffs) == 1 and list(row_coeffs.values())[0] == 1.0:
+                    var_idx = list(row_coeffs.keys())[0]
+                    current_min, current_max = bounds_map.get(var_idx, (0, None))
+                    bounds_map[var_idx] = (max(current_min, rhs_val), current_max)
+                else:
+                    # Restrição normal invertida
+                    neg_coeffs = {k: -v for k, v in row_coeffs.items()}
+                    A_ub.append((neg_coeffs, -rhs_val))
             elif operator == '=':
                 A_eq.append((row_coeffs, rhs_val))
 
-        # 3. Montar Matrizes Finais
+        # 3. Montar Matrizes
         n_vars = len(self.var_names)
-        
-        # Vetor C
         c = np.zeros(n_vars)
-        for idx, val in c_coeffs.items():
-            c[idx] = val
+        for idx, val in c_coeffs.items(): c[idx] = val
 
-        # Matrizes UB
         mat_A_ub = np.zeros((len(A_ub), n_vars)) if A_ub else None
         vec_b_ub = np.zeros(len(A_ub)) if A_ub else None
-        
         if A_ub:
             for i, (coeffs, val) in enumerate(A_ub):
                 vec_b_ub[i] = val
-                for idx, v in coeffs.items():
-                    mat_A_ub[i, idx] = v
+                for idx, v in coeffs.items(): mat_A_ub[i, idx] = v
 
-        # Matrizes EQ
         mat_A_eq = np.zeros((len(A_eq), n_vars)) if A_eq else None
         vec_b_eq = np.zeros(len(A_eq)) if A_eq else None
-        
         if A_eq:
             for i, (coeffs, val) in enumerate(A_eq):
                 vec_b_eq[i] = val
-                for idx, v in coeffs.items():
-                    mat_A_eq[i, idx] = v
+                for idx, v in coeffs.items(): mat_A_eq[i, idx] = v
+        
+        # Consolida bounds
+        final_bounds = []
+        for i in range(n_vars):
+            final_bounds.append(bounds_map.get(i, (0, None)))
 
         return {
-            'c': c,
-            'A_ub': mat_A_ub, 'b_ub': vec_b_ub,
+            'c': c, 'A_ub': mat_A_ub, 'b_ub': vec_b_ub,
             'A_eq': mat_A_eq, 'b_eq': vec_b_eq,
-            'sense': sense,
-            'var_names': self.var_names
+            'sense': sense, 'var_names': self.var_names,
+            'bounds': final_bounds
         }
 
 # ==============================================================================
-# 2. MOTOR LÓGICO: BRANCH AND BOUND SOLVER (O Mesmo do Notebook)
+# 2. MOTOR LÓGICO: BRANCH AND BOUND SOLVER
 # ==============================================================================
 class BranchAndBoundSolver:
     def __init__(self, c, A_ub=None, b_ub=None, A_eq=None, b_eq=None, bounds=None, sense='max', var_names=None):
@@ -158,9 +143,7 @@ class BranchAndBoundSolver:
         self.A_eq = A_eq
         self.b_eq = b_eq
         self.var_names = var_names if var_names else [f"x{i+1}" for i in range(len(c))]
-        
-        n_vars = len(c)
-        self.base_bounds = [(0, None)] * n_vars
+        self.base_bounds = bounds if bounds else [(0, None)] * len(c)
         
         self.best_int_solution = None
         self.best_int_value = -np.inf if sense == 'max' else np.inf
@@ -168,65 +151,52 @@ class BranchAndBoundSolver:
         self.nodes_count = 0
 
     def solve_relaxed(self, current_bounds):
-        return linprog(
-            c=self.c, A_ub=self.A_ub, b_ub=self.b_ub,
-            A_eq=self.A_eq, b_eq=self.b_eq,
-            bounds=current_bounds, method='highs'
-        )
+        return linprog(c=self.c, A_ub=self.A_ub, b_ub=self.b_ub, A_eq=self.A_eq, b_eq=self.b_eq,
+                       bounds=current_bounds, method='highs')
 
     def is_integer(self, x):
         return np.all(np.abs(x - np.round(x)) < 1e-5)
 
     def get_branching_variable(self, x):
-        fractional_parts = np.abs(x - np.round(x))
-        candidates = np.where(fractional_parts > 1e-5)[0]
+        frac_parts = np.abs(x - np.round(x))
+        candidates = np.where(frac_parts > 1e-5)[0]
         if len(candidates) == 0: return None, None
-        best_idx = candidates[np.argmax(fractional_parts[candidates])]
-        return best_idx, x[best_idx]
+        return candidates[np.argmax(frac_parts[candidates])], x[candidates[np.argmax(frac_parts[candidates])]]
 
-    def _format_value(self, v):
+    def _fmt(self, v):
+        if v is None: return "-"
+        if isinstance(v, (list, np.ndarray)): return str(tuple([int(round(i)) for i in v])).replace("'", "")
         if abs(v - round(v)) < 1e-5: return f"{int(round(v))}"
         return f"{v:.4f}"
 
     def solve(self):
-        n_vars = len(self.c)
         queue = [{'bounds': copy.deepcopy(self.base_bounds), 'id': 1, 'parent': 0, 'constraint': 'Raiz'}]
         self.nodes_count = 0
         
         while queue:
             node = queue.pop(0)
             self.nodes_count += 1
-            
             res = self.solve_relaxed(node['bounds'])
             z_val = -res.fun if self.sense == 'max' and res.success else res.fun
             
-            node_record = {
-                'id': node['id'], 'parent': node['parent'], 
-                'constraint': node['constraint'], 'z': z_val, 
-                'x': res.x if res.success else None,
-                'status': '', 'pruned': False
-            }
+            node_rec = {'id': node['id'], 'parent': node['parent'], 'constraint': node['constraint'], 
+                        'z': z_val, 'x': res.x if res.success else None, 'status': '', 'pruned': False}
 
             if not res.success:
-                node_record['status'] = "Infactível"
-                node_record['pruned'] = True
-                self.tree_log.append(node_record)
-                continue
+                node_rec.update({'status': "Infactível", 'pruned': True})
+                self.tree_log.append(node_rec); continue
 
-            is_bound_pruned = False
+            is_pruned = False
             if self.best_int_solution is not None:
-                if self.sense == 'max' and z_val <= self.best_int_value + 1e-6: is_bound_pruned = True
-                elif self.sense == 'min' and z_val >= self.best_int_value - 1e-6: is_bound_pruned = True
+                if (self.sense == 'max' and z_val <= self.best_int_value + 1e-6) or \
+                   (self.sense == 'min' and z_val >= self.best_int_value - 1e-6): is_pruned = True
             
-            if is_bound_pruned:
-                node_record['status'] = f"Poda (Z={z_val:.2f})"
-                node_record['pruned'] = True
-                self.tree_log.append(node_record)
-                continue
+            if is_pruned:
+                node_rec.update({'status': f"Poda (Z={z_val:.2f})", 'pruned': True})
+                self.tree_log.append(node_rec); continue
 
             if self.is_integer(res.x):
-                node_record['status'] = "Inteira"
-                node_record['pruned'] = True
+                node_rec.update({'status': "Inteira", 'pruned': True})
                 update = False
                 if self.best_int_solution is None: update = True
                 elif self.sense == 'max' and z_val > self.best_int_value: update = True
@@ -235,29 +205,23 @@ class BranchAndBoundSolver:
                 if update:
                     self.best_int_value = z_val
                     self.best_int_solution = res.x
-                    node_record['status'] += " (Nova Melhor!)"
-                else:
-                    node_record['status'] += " (Sub-ótima)"
-                self.tree_log.append(node_record)
-                continue
+                    node_rec['status'] += " (Nova Melhor!)"
+                else: node_rec['status'] += " (Sub-ótima)"
+                self.tree_log.append(node_rec); continue
 
             idx, val = self.get_branching_variable(res.x)
-            node_record['status'] = f"Ramificar {self.var_names[idx]}"
-            self.tree_log.append(node_record)
+            node_rec['status'] = f"Ramificar {self.var_names[idx]}"
+            self.tree_log.append(node_rec)
             
             floor_v, ceil_v = np.floor(val), np.ceil(val)
+            lb, rb = copy.deepcopy(node['bounds']), copy.deepcopy(node['bounds'])
             
-            left_bounds = copy.deepcopy(node['bounds'])
-            l_min, l_max = left_bounds[idx]
-            left_bounds[idx] = (l_min, floor_v if l_max is None else min(l_max, floor_v))
-            
-            right_bounds = copy.deepcopy(node['bounds'])
-            r_min, r_max = right_bounds[idx]
-            right_bounds[idx] = (max(r_min, ceil_v), r_max)
+            lb[idx] = (lb[idx][0], min(lb[idx][1] if lb[idx][1] is not None else np.inf, floor_v))
+            rb[idx] = (max(rb[idx][0], ceil_v), rb[idx][1])
 
             next_id = self.nodes_count + len(queue) + 1
-            queue.append({'bounds': left_bounds, 'id': next_id, 'parent': node['id'], 'constraint': f"{self.var_names[idx]} <= {floor_v:.0f}"})
-            queue.append({'bounds': right_bounds, 'id': next_id+1, 'parent': node['id'], 'constraint': f"{self.var_names[idx]} >= {ceil_v:.0f}"})
+            queue.append({'bounds': lb, 'id': next_id, 'parent': node['id'], 'constraint': f"{self.var_names[idx]} <= {floor_v:.0f}"})
+            queue.append({'bounds': rb, 'id': next_id+1, 'parent': node['id'], 'constraint': f"{self.var_names[idx]} >= {ceil_v:.0f}"})
 
         return self.best_int_solution, self.best_int_value
 
@@ -266,125 +230,177 @@ class BranchAndBoundSolver:
 # ==============================================================================
 
 def main():
-    st.set_page_config(page_title="Solver Branch & Bound", page_icon="🌳", layout="wide")
+    st.set_page_config(page_title="Solver B&B - FPO", page_icon="🌳", layout="wide")
 
     st.title("🌳 Solver de Programação Inteira (Branch and Bound)")
     st.markdown("""
-    Esta ferramenta resolve problemas de **Programação Linear Inteira (PLI)** utilizando o algoritmo **Branch and Bound**.
-    Ela foi desenvolvida para atender aos critérios da **Questão 5(c)** do Trabalho Final de FPO.
+    **Trabalho Final de Pesquisa Operacional - Questão 5(c)**
     
-    **Características:**
-    * Entrada em notação matemática natural (humana).
-    * Visualização da árvore de decisão e critérios de corte.
-    * Relatório completo para download.
+    Esta ferramenta permite resolver modelos customizados ou carregar os exercícios da lista oficial.
+    O algoritmo exibe a árvore de decisão completa e permite validação dos resultados.
     """)
+    
+    st.divider()
 
-    # --- Sidebar: Exemplos ---
-    st.sidebar.header("Carregar Exemplo")
-    example_options = {
-        "Limpar": "",
-        "Ex 17: Energéticos (Min)": "Minimizar Z = 0.06x1 + 0.08x2\nSujeito a:\n8x1 + 6x2 >= 48\n1x1 + 2x2 >= 12\n1x1 + 2x2 <= 20",
-        "Ex 18: Quinquilharias (Max)": "Maximizar Z = 2x1 + 1x2\nSujeito a:\n6x1 + 3x2 <= 480\n2x1 + 4x2 <= 480",
-        "Ex 31: Bens Capital (Igualdade)": "Maximizar Z = 3x1 - 2x2 + 6x3\nSujeito a:\nx1 + x2 + 2x3 = 12\n2x1 + 3x2 + 12x3 <= 48"
+    # --- Dicionário de Exercícios Completo ---
+    # A notação >= 0 é adicionada ao final para clareza visual, embora o parser assuma default.
+    exercises = {
+        "Selecione um exercício...": "",
+        "Ex 17: Energéticos": "Minimizar Z = 0.06x1 + 0.08x2\nSujeito a:\n8x1 + 6x2 >= 48\n1x1 + 2x2 >= 12\n1x1 + 2x2 <= 20\nx1, x2 >= 0",
+        "Ex 18: Quinquilharias": "Maximizar Z = 2x1 + 1x2\nSujeito a:\n6x1 + 3x2 <= 480\n2x1 + 4x2 <= 480\nx1, x2 >= 0",
+        "Ex 21: Janelas": "Maximizar Z = 60x1 + 30x2\nSujeito a:\nx1 <= 6\nx2 <= 4\n6x1 + 8x2 <= 48\nx1, x2 >= 0",
+        "Ex 26a: Forma Padrão": "Maximizar Z = 2x1 - 1x2 + 1x3\nSujeito a:\n3x1 + x2 + x3 <= 60\nx1 - x2 + x3 <= 10\nx1 + x2 - x3 <= 20\nx1, x2, x3 >= 0",
+        "Ex 26b: Forma Padrão (Igualdade)": "Minimizar Z = -2x1 + 0.75x2 - 12x3\nSujeito a:\nx1 - 5x3 <= 3\nx1 + x2 = 12\n-3x1 - x2 + x3 <= 27\nx1, x2, x3 >= 0",
+        "Ex 26c: Variável Livre (u-v)": "Maximizar Z = 4u - 4v + 3x2\nSujeito a:\nu - v + 3x2 <= 7\n2u - 2v + 2x2 <= 8\nu - v + x2 <= 3\nx2 <= 2\nu, v, x2 >= 0",
+        "Ex 26d: Bounds Específicos": "Minimizar Z = 8x1 + 10x2\nSujeito a:\n-x1 + x2 <= 2\n-4x1 - 5x2 <= -20\nx1 <= 6\nx2 >= 4",
+        "Ex 26e: Misto": "Minimizar Z = 2x1 + 6x2\nSujeito a:\n-4x1 - 3x2 <= -12\n2x1 + x2 = 8\nx1, x2 >= 0",
+        "Ex 28: Malas e Mochilas": "Maximizar Z = 50x1 + 40x2\nSujeito a:\n2x1 <= 300\n3x2 <= 540\n2x1 + 2x2 <= 440\n1.2x1 + 1.5x2 <= 300\nx1, x2 >= 0",
+        "Ex 29: Canhões": "Maximizar Z = 23x1 + 32x2\nSujeito a:\n10x1 + 6x2 <= 2500\n5x1 + 10x2 <= 2000\n1x1 + 2x2 <= 500\nx1, x2 >= 0",
+        "Ex 31: Bens Capital": "Maximizar Z = 3x1 - 2x2 + 6x3\nSujeito a:\nx1 + x2 + 2x3 = 12\n2x1 + 3x2 + 12x3 <= 48\nx1, x2, x3 >= 0"
     }
-    
-    selected_example = st.sidebar.selectbox("Escolha um exercício da lista:", list(example_options.keys()))
-    
-    # --- Área de Entrada ---
-    col1, col2 = st.columns([1, 1])
-    
-    with col1:
-        st.subheader("1. Definição do Modelo")
-        st.markdown("**Formato Aceito:**")
-        st.code("""Maximizar Z = 2x1 + 3x2
-Sujeito a:
-x1 + x2 <= 10
-2x1 - x2 >= 5""")
-        
-        default_text = example_options[selected_example]
-        problem_text = st.text_area("Digite ou cole seu modelo abaixo:", value=default_text, height=300)
-        
-        solve_btn = st.button("🚀 Resolver Modelo", type="primary")
 
-    # --- Processamento e Resultados ---
+    # --- Área de Seleção e Edição (Layout Melhorado) ---
+    col_input, col_info = st.columns([2, 1])
+
+    with col_input:
+        st.subheader("1. Entrada de Dados")
+        
+        # Selectbox acima da área de texto
+        selected_key = st.selectbox("📚 Carregar Exercício da Lista:", list(exercises.keys()))
+        
+        # Área de texto populada dinamicamente
+        input_value = exercises[selected_key]
+        problem_text = st.text_area("Edite o modelo matemático aqui:", value=input_value, height=350,
+                                    placeholder="Maximizar Z = ...\nSujeito a:\n...")
+        
+        solve_btn = st.button("🚀 Resolver Modelo", type="primary", use_container_width=True)
+
+    with col_info:
+        st.info("""
+        **Guia de Sintaxe:**
+        1. **Objetivo:** Comece com 'Maximizar' ou 'Minimizar'. Use '='.
+        2. **Restrições:** Use `Sujeito a:` seguido das equações.
+        3. **Operadores:** Use `<=`, `>=` ou `=`.
+        4. **Variáveis:** Use nomes como `x1`, `xA`, `y`.
+        5. **Não-negatividade:** O sistema assume `x >= 0` por padrão, mas você pode escrever para clareza.
+        
+        *Exemplo:*
+        ```text
+        Maximizar Z = 3x1 + 5x2
+        Sujeito a:
+        x1 <= 4
+        2x2 <= 12
+        3x1 + 2x2 = 18
+        x1, x2 >= 0
+        ```
+        """)
+
+    st.divider()
+
+    # --- Processamento ---
     if solve_btn and problem_text:
-        with col2:
-            try:
-                # 1. Parsing
-                parser = ModelParser()
-                model_data = parser.parse(problem_text)
-                
-                # 2. Mostra interpretação matemática (Feedback visual)
-                st.subheader("2. Interpretação do Modelo")
-                
-                # Renderiza função objetivo em LaTeX
-                sense_str = model_data['sense'].title()
-                obj_terms = []
-                for i, c in enumerate(model_data['c']):
-                    coeff = f"{c:.2f}".rstrip('0').rstrip('.')
-                    if c >= 0 and i > 0: coeff = f"+ {coeff}"
-                    obj_terms.append(f"{coeff}{model_data['var_names'][i]}")
-                st.latex(f"\\text{{{sense_str}}} \\quad Z = {' '.join(obj_terms)}")
-                
-                # 3. Resolução
-                solver = BranchAndBoundSolver(
-                    c=model_data['c'],
-                    A_ub=model_data['A_ub'], b_ub=model_data['b_ub'],
-                    A_eq=model_data['A_eq'], b_eq=model_data['b_eq'],
-                    sense=model_data['sense'],
-                    var_names=model_data['var_names']
-                )
-                
-                with st.spinner("Executando Branch and Bound..."):
-                    best_sol, best_val = solver.solve()
+        try:
+            # 1. Parsing
+            parser = ModelParser()
+            model_data = parser.parse(problem_text)
+            
+            # 2. Feedback Matemático (LaTeX)
+            st.subheader("2. Interpretação do Modelo")
+            
+            # Formatação da FO
+            sense = model_data['sense'].title()
+            terms = []
+            for i, c in enumerate(model_data['c']):
+                if abs(c) > 1e-5:
+                    s = f"+ {c:.2g}" if c > 0 else f"- {abs(c):.2g}"
+                    if i == 0 and c > 0: s = f"{c:.2g}"
+                    terms.append(f"{s}{model_data['var_names'][i]}")
+            st.latex(f"\\text{{{sense}}} \\quad Z = {' '.join(terms)}")
+            
+            # Formatação das Restrições
+            st.markdown("**Restrições Identificadas:**")
+            
+            # UB
+            if model_data['A_ub'] is not None:
+                for i, row in enumerate(model_data['A_ub']):
+                    lhs = " + ".join([f"{v:.2g}{model_data['var_names'][j]}" for j, v in enumerate(row) if abs(v)>1e-5])
+                    st.latex(f"{lhs} \\le {model_data['b_ub'][i]:.2g}")
+            
+            # EQ
+            if model_data['A_eq'] is not None:
+                for i, row in enumerate(model_data['A_eq']):
+                    lhs = " + ".join([f"{v:.2g}{model_data['var_names'][j]}" for j, v in enumerate(row) if abs(v)>1e-5])
+                    st.latex(f"{lhs} = {model_data['b_eq'][i]:.2g}")
+            
+            st.latex(f"{', '.join(model_data['var_names'])} \\ge 0, \\in \\mathbb{{Z}}")
 
-                # 4. Resultados Finais
-                st.subheader("3. Resultado Final")
-                
-                if best_sol is not None:
-                    st.success(f"**Solução Ótima Inteira Encontrada!**")
-                    st.metric(label="Valor da Função Objetivo (Z*)", value=f"{best_val:.4f}")
-                    
-                    # Tabela de Variáveis
-                    sol_dict = {name: int(round(val)) for name, val in zip(model_data['var_names'], best_sol)}
-                    st.write("**Variáveis de Decisão:**")
-                    st.json(sol_dict)
-                else:
-                    st.error("O problema não possui solução inteira viável.")
+            # 3. Solver
+            solver = BranchAndBoundSolver(
+                c=model_data['c'], A_ub=model_data['A_ub'], b_ub=model_data['b_ub'],
+                A_eq=model_data['A_eq'], b_eq=model_data['b_eq'], bounds=model_data['bounds'],
+                sense=model_data['sense'], var_names=model_data['var_names']
+            )
+            
+            with st.spinner("Calculando solução ótima inteira..."):
+                best_sol, best_val = solver.solve()
 
-                # 5. Relatório Detalhado (Log)
-                report_text = f"RELATÓRIO DE RESOLUÇÃO\n{'='*40}\n\n"
-                report_text += f"MODELO DE ENTRADA:\n{problem_text}\n\n"
-                report_text += f"{'-'*40}\nÁRVORE DE DECISÃO (Branch & Bound)\n{'-'*40}\n"
-                report_text += f"{'ID':<4} | {'Pai':<4} | {'Restrição':<15} | {'Z Relaxado':<12} | {'Status'}\n"
-                
-                tree_data = []
-                for node in solver.tree_log:
-                    z_str = f"{node['z']:.4f}" if node['z'] is not None else "---"
-                    report_text += f"{node['id']:<4} | {node['parent']:<4} | {node['constraint']:<15} | {z_str:<12} | {node['status']}\n"
-                    tree_data.append({
-                        "ID": node['id'], "Pai": node['parent'], 
-                        "Restrição": node['constraint'], "Z": z_str, 
-                        "Status": node['status'],
-                        "Solução (X)": str([solver._format_value(v) for v in node['x']]) if node['x'] is not None else ""
-                    })
-                
-                st.subheader("4. Árvore de Decisão Detalhada")
-                st.dataframe(pd.DataFrame(tree_data), use_container_width=True)
+            # 4. Resultados
+            st.subheader("3. Resultados")
+            col_res1, col_res2 = st.columns(2)
+            
+            if best_sol is not None:
+                with col_res1:
+                    st.success("✅ Solução Ótima Inteira Encontrada")
+                    st.metric("Função Objetivo (Z*)", f"{best_val:.4f}")
+                with col_res2:
+                    st.write("**Variáveis de Decisão (x*):**")
+                    # Formatação de Tupla (x1, x2, ...)
+                    tuple_str = str(tuple([int(round(v)) for v in best_sol])).replace("'", "")
+                    st.code(tuple_str, language="text")
+            else:
+                st.error("⚠️ Não foi encontrada solução inteira viável para as restrições dadas.")
 
-                # 6. Botão de Download
-                st.download_button(
-                    label="📥 Baixar Relatório Completo (.txt)",
-                    data=report_text,
-                    file_name="solucao_branch_bound.txt",
-                    mime="text/plain"
-                )
+            # 5. Tabela de Auditoria (Log)
+            st.subheader("4. Detalhes da Execução (Árvore de Decisão)")
+            
+            tree_data = []
+            for node in solver.tree_log:
+                tree_data.append({
+                    "ID": node['id'],
+                    "Pai": node['parent'],
+                    "Restrição Adicionada": node['constraint'],
+                    "Z (Relaxado)": solver._fmt(node['z']) if node['z'] else "-",
+                    "Status / Ação": node['status'],
+                    "Solução Parcial (x)": solver._fmt(node['x']) if node['x'] is not None else "-"
+                })
+            
+            st.dataframe(pd.DataFrame(tree_data), use_container_width=True, hide_index=True)
 
-            except ValueError as ve:
-                st.error(f"❌ Erro de Sintaxe: {ve}")
-                st.info("Verifique se usou a notação correta (ex: '2x1 + 3x2 <= 10').")
-            except Exception as e:
-                st.error(f"❌ Erro Inesperado: {e}")
+            # 6. Relatório para Download
+            report_lines = [
+                "RELATÓRIO FINAL - SOLVER BRANCH AND BOUND",
+                "="*50,
+                f"MODELO ORIGINAL:\n{problem_text}",
+                "-"*50,
+                "RESULTADO FINAL:",
+                f"Status: {'Sucesso' if best_sol is not None else 'Inviável'}",
+                f"Z*: {best_val:.4f}",
+                f"x*: {tuple([int(round(v)) for v in best_sol]) if best_sol is not None else '-'}",
+                "-"*50,
+                "HISTÓRICO DA ÁRVORE:",
+                pd.DataFrame(tree_data).to_string(index=False)
+            ]
+            
+            st.download_button(
+                label="📥 Baixar Relatório (.txt)",
+                data="\n".join(report_lines),
+                file_name="resultado_branch_bound.txt",
+                mime="text/plain"
+            )
+
+        except Exception as e:
+            st.error(f"Erro ao processar o modelo: {str(e)}")
+            st.warning("Verifique a sintaxe. Certifique-se de usar pontos para decimais (ex: 1.5) e não vírgulas.")
 
 if __name__ == "__main__":
     main()
